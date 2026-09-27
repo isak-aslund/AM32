@@ -533,6 +533,17 @@ int16_t phase_C_position;
 uint16_t step_delay = 100;
 char stepper_sine = 0;
 char forward = 1;
+
+// folding prop soft start (quiet.soft_start): one shot open loop sine
+// ramp from standstill, re-armed only after zero throttle and zero speed
+uint8_t soft_start_armed = 1;
+uint8_t soft_start_active = 0;
+uint32_t soft_start_elapsed_us = 0;
+uint32_t soft_start_stop_count = 0; // loop ticks of continuous zero throttle
+uint8_t soft_start_stopped_seen = 0; // a back-emf timeout (true standstill) was seen at zero throttle
+#ifdef MCU_SITL
+void sitl_soft_start_rearmed(void);
+#endif
 uint16_t gate_drive_offset = DEAD_TIME;
 
 uint8_t stuckcounter = 0;
@@ -656,6 +667,18 @@ void loadEEpromSettings()
 #ifndef HAVE_PHASE_BLEND
     eepromBuffer.quiet.soft_comm = 0; // no per phase drive helpers on this target
 #endif
+    if (eepromBuffer.quiet.soft_start > 9) {
+        eepromBuffer.quiet.soft_start = 0;
+    }
+    if (!eepromBuffer.comp_pwm) {
+        eepromBuffer.quiet.soft_start = 0; // sine drive needs complementary pwm
+    }
+#ifdef GIMBAL_MODE
+    eepromBuffer.quiet.soft_start = 0; // gimbal mode owns the stepper drive
+#endif
+    if (eepromBuffer.quiet.soft_start_erpm < 5 || eepromBuffer.quiet.soft_start_erpm > 100) {
+        eepromBuffer.quiet.soft_start_erpm = 21; // 2100 erpm, the stock sine changeover speed
+    }
     // eepromBuffer.advance_level can either be set to 0-3 with config tools less than 1.90 or 10-42 with 1.90 or above 
     if (eepromBuffer.advance_level > 42 || (eepromBuffer.advance_level < 10 && eepromBuffer.advance_level > 3)){
         temp_advance = 16;
@@ -1324,12 +1347,30 @@ void setInput()
 if (!stepper_sine && armed) {
         if (input >= 47 + (80 * eepromBuffer.use_sine_start)) {
             if (running == 0) {
-                allOff();
-                if (!old_routine) {
-                    startMotor();
+                if (eepromBuffer.quiet.soft_start && soft_start_armed
+                    && !eepromBuffer.use_sine_start && temp_comp_pwm
+                    && !eepromBuffer.rc_car_reverse) {
+                    // folding prop soft start: one shot open loop sine
+                    // ramp from standstill so the blades unfold gently
+                    // instead of slamming into their stops. Consumed
+                    // here, re-armed only after zero throttle + stopped
+                    soft_start_armed = 0;
+                    soft_start_stopped_seen = 0;
+                    soft_start_active = 1;
+                    soft_start_elapsed_us = 0;
+                    phase_A_position = 0;
+                    phase_B_position = 119;
+                    phase_C_position = 239;
+                    do_once_sinemode = 1;
+                    stepper_sine = 1;
+                } else {
+                    allOff();
+                    if (!old_routine) {
+                        startMotor();
+                    }
+                    running = 1;
+                    last_duty_cycle = min_startup_duty;
                 }
-                running = 1;
-                last_duty_cycle = min_startup_duty;
             }
 
             if (eepromBuffer.use_sine_start) {
@@ -1531,6 +1572,39 @@ void tenKhzRoutine()
 { // 20khz as of 2.00 to be renamed
     duty_cycle = duty_cycle_setpoint;
     tenkhzcounter++;
+#ifndef BRUSHED_MODE
+    // folding prop soft start re-arm. It must fire only when the motor
+    // is genuinely stopped, never when it is still spinning: a slow open
+    // loop sine ramp forced onto a spinning motor would be violent. The
+    // 'running' flag is not a reliable standstill signal because AM32's
+    // desync detector clears it during a fast coast down while the prop
+    // is still turning. So re-arm on a confirmed stop only:
+    //   - soft_start_stopped_seen: a back-emf timeout was observed at
+    //     zero throttle (the motor actually stopped commutating), or
+    //   - two full seconds of continuous zero throttle, a fallback for
+    //     the case where a coast-down desync cleared 'running' so the
+    //     timeout body above is skipped; any prop has stopped by then.
+    // A brief in-flight throttle chop (well under 2s, motor still
+    // spinning) satisfies neither and cannot re-arm.
+    if (eepromBuffer.quiet.soft_start) {
+        if ((input < 47) && !stepper_sine) {
+            if (soft_start_stop_count < (LOOP_FREQUENCY_HZ * 4)) {
+                soft_start_stop_count++;
+            }
+            if (!soft_start_armed &&
+                (soft_start_stopped_seen ||
+                 soft_start_stop_count > (uint32_t)(LOOP_FREQUENCY_HZ * 2))) {
+#ifdef MCU_SITL
+                sitl_soft_start_rearmed();
+#endif
+                soft_start_armed = 1;
+            }
+        } else {
+            soft_start_stop_count = 0;
+            soft_start_stopped_seen = 0; // motor being driven again
+        }
+    }
+#endif
     ledcounter++;
     ramp_count++;
     one_khz_loop_counter++;
@@ -2470,6 +2544,10 @@ if(zero_crosses < 5){
                 if (input < 48) {
                     running = 0;
                     commutation_interval = 5000;
+                    // motor has stopped commutating at zero throttle: a
+                    // true standstill, so the folding prop soft start may
+                    // re-arm (see the re-arm block in tenKhzRoutine)
+                    soft_start_stopped_seen = 1;
                 }
                 zero_crosses = 0;
                 zcfoundroutine();
@@ -2502,7 +2580,50 @@ if(zero_crosses < 5){
 
             if (input > 48 && armed) {
                 PROCESS_ADC_FLAG = 1;
-                if (input > 48 && input < 137) { // sine wave stepper
+                if (soft_start_active) {
+                    // folding prop soft start: constant acceleration open
+                    // loop sine ramp, independent of the commanded
+                    // throttle, from ~500 erpm to the handover speed
+                    if (do_once_sinemode) {
+                        DISABLE_COM_TIMER_INT();
+                        maskPhaseInterrupts();
+                        SET_DUTY_CYCLE_ALL(0);
+                        allpwm();
+                        do_once_sinemode = 0;
+                    }
+                    uint32_t ramp_us = (uint32_t)eepromBuffer.quiet.soft_start * 500000;
+                    uint32_t target_erpm = (uint32_t)eepromBuffer.quiet.soft_start_erpm * 100;
+                    uint32_t erpm = target_erpm;
+                    if (soft_start_elapsed_us < ramp_us) {
+                        erpm = 500 + (uint32_t)(((uint64_t)(target_erpm - 500) * soft_start_elapsed_us) / ramp_us);
+                    }
+                    step_delay = (uint16_t)(166667 / erpm); // us per electrical degree
+                    advanceincrement();
+                    delayMicros(step_delay);
+                    soft_start_elapsed_us += step_delay;
+                    e_rpm = 600 / step_delay;
+                    e_com_time = step_delay * 360;
+                    if ((soft_start_elapsed_us >= ramp_us) && (phase_A_position == 0)) {
+                        // at speed and aligned: hand over to normal drive,
+                        // same seeding as the sine start changeover
+                        soft_start_active = 0;
+                        stepper_sine = 0;
+                        running = 1;
+                        old_routine = 1;
+                        commutation_interval = (uint32_t)step_delay * 120; // 60 deg in 0.5us ticks
+                        average_interval = commutation_interval;
+                        last_average_interval = average_interval;
+                        SET_INTERVAL_TIMER_COUNT(commutation_interval);
+                        zero_crosses = 20;
+                        prop_brake_active = 0;
+                        step = changeover_step;
+                        if (eepromBuffer.stall_protection) {
+                            last_duty_cycle = stall_protect_minimum_duty;
+                        }
+                        commutate();
+                        generatePwmTimerEvent();
+                    }
+                } else if (input > 48 && input < 137) { // sine wave stepper
 
                     if (do_once_sinemode) {
                         // disable commutation interrupt in case set
@@ -2516,7 +2637,7 @@ if(zero_crosses < 5){
                     step_delay = map(input, 48, 120, 7000 / eepromBuffer.motor_poles, 810 / eepromBuffer.motor_poles);
                     delayMicros(step_delay);
                     e_rpm = 600 / step_delay; // in hundreds so 33 e_rpm is 3300 actual erpm
-                    e_com_time = step_delay * 360; 
+                    e_com_time = step_delay * 360;
 
                 } else {
                     do_once_sinemode = 1;
@@ -2548,6 +2669,14 @@ if(zero_crosses < 5){
                 }
 
             } else {
+                if (soft_start_active) {
+                    // throttle cut mid ramp: leave sine mode entirely
+                    // (with use_sine_start off nothing else exits it);
+                    // the stopped + zero throttle counter re-arms later
+                    soft_start_active = 0;
+                    stepper_sine = 0;
+                    allOff();
+                }
                 running = 0;
                 do_once_sinemode = 1;
                 if (eepromBuffer.brake_on_stop == 1) {

@@ -74,8 +74,10 @@ typedef union EEprom_u {
             uint8_t demag_blank; // 184  0=off, 1-4 post-commutation zero cross blanking strength
             uint8_t comm_filter; // 185  0=legacy 50% IIR, 1-4 low gain interval filter with outlier clamp
             uint8_t soft_comm; // 186  0=off, 1-4 soft commutation ramp length (needs HAVE_PHASE_BLEND target)
+            uint8_t soft_start; // 187  0=off, 1-9 folding prop sine soft start, ramp time in 0.5s units
+            uint8_t soft_start_erpm; // 188  soft start handover speed in hundreds of erpm, 5-100
         } quiet;
-        uint8_t reserved_2[5]; // 187-191
+        uint8_t reserved_2[3]; // 189-191
     };
     uint8_t buffer[192];
 } EEprom_t;

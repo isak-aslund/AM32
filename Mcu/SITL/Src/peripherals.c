@@ -85,9 +85,16 @@ void enableCorePeripherals(void)
     sitl_tenkhz_enable();
 }
 
+/*
+  On the G431/L431 class hardware this simulation emulates, TIM1 CH1/2/3
+  are PA8/PA9/PA10 which the boards wire as phase C/B/A. The sine drive
+  (setPWMCompareX) inherits that swap: "compare 1" physically drives
+  phase C. Sine mode rotation direction on hardware depends on it, so
+  mirror the mapping here (simulation phases are 0=A 1=B 2=C).
+ */
 void setPWMCompare1(uint16_t compareone)
 {
-    sitl_tim1_set_duty(0, compareone);
+    sitl_tim1_set_duty(2, compareone);
 }
 
 void setPWMCompare2(uint16_t comparetwo)
@@ -97,7 +104,7 @@ void setPWMCompare2(uint16_t comparetwo)
 
 void setPWMCompare3(uint16_t comparethree)
 {
-    sitl_tim1_set_duty(2, comparethree);
+    sitl_tim1_set_duty(0, comparethree);
 }
 
 void generatePwmTimerEvent(void)

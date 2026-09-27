@@ -140,3 +140,10 @@ void twoChannelReverse(void)
     phasePWM(1);
     phaseLOW(2);
 }
+
+// diagnostic hook for the folding prop soft start re-arm (firmware calls
+// this from tenKhzRoutine on the 0->1 armed transition under MCU_SITL)
+void sitl_soft_start_rearmed(void)
+{
+    fprintf(stderr, "SITL: soft_start re-armed\n");
+}

@@ -185,11 +185,11 @@ static const struct parameter {
         { "COMM_FILTER",            T_UINT8, 0, 4,   0, &eepromBuffer.quiet.comm_filter},
         { "SOFT_COMM",              T_UINT8, 0, 4,   0, &eepromBuffer.quiet.soft_comm},
         // SOFT_START: folding prop soft start. One shot open loop sine
-        // ramp from standstill (ramp time = value * 0.5s) up to
-        // SOFT_START_ERPM * 100 erpm where normal drive takes over;
-        // re-armed only after zero throttle and zero speed. Uses
-        // SINE_MODE_POWER for the drive strength, needs COMP_PWM
-        { "SOFT_START",             T_UINT8, 0, 9,   0, &eepromBuffer.quiet.soft_start},
+        // ramp from standstill (ramp time = value * 0.1s, so 5 = 0.5s,
+        // 10 = 1s) up to SOFT_START_ERPM * 100 erpm where normal drive
+        // takes over; re-armed only after zero throttle and zero speed.
+        // Uses SINE_MODE_POWER for the drive strength, needs COMP_PWM
+        { "SOFT_START",             T_UINT8, 0, 50,  0, &eepromBuffer.quiet.soft_start},
         { "SOFT_START_ERPM",        T_UINT8, 5, 100, 21, &eepromBuffer.quiet.soft_start_erpm},
         { "STARTUP_POWER",          T_UINT8, 50,150, 100, &eepromBuffer.startup_power},
         { "STALL_PROTECTION",       T_UINT8, 0, 3,   0, &eepromBuffer.stall_protection},

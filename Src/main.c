@@ -667,7 +667,7 @@ void loadEEpromSettings()
 #ifndef HAVE_PHASE_BLEND
     eepromBuffer.quiet.soft_comm = 0; // no per phase drive helpers on this target
 #endif
-    if (eepromBuffer.quiet.soft_start > 9) {
+    if (eepromBuffer.quiet.soft_start > 50) {
         eepromBuffer.quiet.soft_start = 0;
     }
     if (!eepromBuffer.comp_pwm) {
@@ -2591,7 +2591,7 @@ if(zero_crosses < 5){
                         allpwm();
                         do_once_sinemode = 0;
                     }
-                    uint32_t ramp_us = (uint32_t)eepromBuffer.quiet.soft_start * 500000;
+                    uint32_t ramp_us = (uint32_t)eepromBuffer.quiet.soft_start * 100000;
                     uint32_t target_erpm = (uint32_t)eepromBuffer.quiet.soft_start_erpm * 100;
                     uint32_t erpm = target_erpm;
                     if (soft_start_elapsed_us < ramp_us) {

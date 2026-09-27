@@ -5737,6 +5737,14 @@
 #define LOOP_FREQUENCY_HZ 20000
 #endif
 
+// soft commutation blend (quiet.soft_comm): needs the exported per phase
+// drive helpers in the MCU layer, a 32 bit interval timer and preloaded
+// TIM1 compare registers. Currently provided by the L431 and SITL layers.
+#if (defined(MCU_L431) || defined(MCU_SITL)) && !defined(PWM_ENABLE_BRIDGE) \
+    && !defined(BRUSHED_MODE) && !defined(GIMBAL_MODE)
+#define HAVE_PHASE_BLEND 1
+#endif
+
 #define PID_LOOP_DIVIDER (LOOP_FREQUENCY_HZ / 1000)
 
 // default to no DroneCAN support

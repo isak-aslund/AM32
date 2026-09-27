@@ -173,6 +173,17 @@ static const struct parameter {
         { "COMP_PWM",               T_BOOL,  0, 1,   1, &eepromBuffer.comp_pwm},
         { "ADVANCE_LEVEL",          T_UINT8, 0, 30,  26, &eepromBuffer.advance_level},
         { "AUTO_ADVANCE",           T_BOOL,  0, 1,   0, &eepromBuffer.auto_advance},
+
+        // quiet drive experiments, all default off
+        // DEMAG_BLANK: ignore comparator zero crosses for 56-75% of the
+        // commutation interval after a commutation (demag rejection)
+        // COMM_FILTER: low gain commutation interval tracking filter with
+        // outlier clamp, new sample weight 1/4 (1) to 1/32 (4)
+        // SOFT_COMM: ramp the outgoing phase over 3.75-15 deg instead of
+        // floating it instantly (only on targets with HAVE_PHASE_BLEND)
+        { "DEMAG_BLANK",            T_UINT8, 0, 4,   0, &eepromBuffer.quiet.demag_blank},
+        { "COMM_FILTER",            T_UINT8, 0, 4,   0, &eepromBuffer.quiet.comm_filter},
+        { "SOFT_COMM",              T_UINT8, 0, 4,   0, &eepromBuffer.quiet.soft_comm},
         { "STARTUP_POWER",          T_UINT8, 50,150, 100, &eepromBuffer.startup_power},
         { "STALL_PROTECTION",       T_UINT8, 0, 3,   0, &eepromBuffer.stall_protection},
         { "STUCK_ROTOR_PROTECTION", T_BOOL,  0, 1,   1, &eepromBuffer.stuck_rotor_protection},

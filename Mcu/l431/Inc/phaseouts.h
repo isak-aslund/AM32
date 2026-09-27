@@ -19,4 +19,9 @@ void proportionalBrake();
 void twoChannelForward();
 void twoChannelReverse();
 
+// soft commutation blend support (HAVE_PHASE_BLEND), phase 0=A 1=B 2=C
+void phaseRestorePWM(uint8_t phase);
+void phaseFloatOne(uint8_t phase);
+void phaseSetCompare(uint8_t phase, uint16_t value);
+
 #endif /* INC_PHASEOUTS_H_ */

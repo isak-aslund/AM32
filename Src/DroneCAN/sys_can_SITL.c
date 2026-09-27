@@ -123,10 +123,20 @@ void sys_can_init(void)
     address[sizeof(address) - 1] = 0;
     address[strlen(address) - 1] = '0' + bus_num;
 
+    // Windows reserves shifting dynamic UDP port ranges (Hyper-V/WSL
+    // exclusions) that can cover the standard mcast port; allow an
+    // override so the bus can move (pydronecan's MCAST_PORT constant
+    // can be patched to match)
+    int mcast_port = MCAST_PORT;
+    const char* port_env = getenv("AM32_SITL_MCAST_PORT");
+    if (port_env != NULL && atoi(port_env) > 0) {
+        mcast_port = atoi(port_env);
+    }
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(MCAST_PORT);
+    addr.sin_port = htons((uint16_t)mcast_port);
     inet_pton(AF_INET, address, &addr.sin_addr);
 
     fd_in = sitl_udp_socket();

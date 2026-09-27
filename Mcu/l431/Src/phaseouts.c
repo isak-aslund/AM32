@@ -360,3 +360,47 @@ void twoChannelReverse()
     phaseBPWM();
     phaseCLOW();
 }
+
+/*
+ * Soft commutation blend support (HAVE_PHASE_BLEND): individual phase
+ * re-entry to complementary PWM, individual float, and per phase access
+ * to the compare register driving that phase.
+ */
+void phaseRestorePWM(uint8_t phase)
+{
+    if (phase == 0) {
+        phaseAPWM();
+    } else if (phase == 1) {
+        phaseBPWM();
+    } else {
+        phaseCPWM();
+    }
+}
+
+void phaseFloatOne(uint8_t phase)
+{
+    if (phase == 0) {
+        phaseAFLOAT();
+    } else if (phase == 1) {
+        phaseBFLOAT();
+    } else {
+        phaseCFLOAT();
+    }
+}
+
+void phaseSetCompare(uint8_t phase, uint16_t value)
+{
+    // TIM1 high side outputs are fixed by the silicon to PA8/PA9/PA10 =
+    // CH1/CH2/CH3, so the phase to channel mapping follows from the
+    // configured high side pin (phase A is PA10/CCR3 on current boards)
+    uint32_t pin = (phase == 0) ? PHASE_A_GPIO_HIGH
+                                : (phase == 1) ? PHASE_B_GPIO_HIGH
+                                               : PHASE_C_GPIO_HIGH;
+    if (pin == LL_GPIO_PIN_8) {
+        TIM1->CCR1 = value;
+    } else if (pin == LL_GPIO_PIN_9) {
+        TIM1->CCR2 = value;
+    } else {
+        TIM1->CCR3 = value;
+    }
+}

@@ -69,8 +69,13 @@ typedef union EEprom_u {
             uint8_t filter_hz; // 181
             uint8_t debug_rate; // 182
             uint8_t term_enable; // 183
-            uint8_t reserved[8]; // 184-191
         } can;
+        struct {
+            uint8_t demag_blank; // 184  0=off, 1-4 post-commutation zero cross blanking strength
+            uint8_t comm_filter; // 185  0=legacy 50% IIR, 1-4 low gain interval filter with outlier clamp
+            uint8_t soft_comm; // 186  0=off, 1-4 soft commutation ramp length (needs HAVE_PHASE_BLEND target)
+        } quiet;
+        uint8_t reserved_2[5]; // 187-191
     };
     uint8_t buffer[192];
 } EEprom_t;

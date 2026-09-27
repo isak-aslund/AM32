@@ -572,6 +572,26 @@ volatile uint16_t waitTime = 0;
 uint16_t signaltimeout = 0;
 uint8_t ubAnalogWatchdogStatus = RESET;
 
+// comparator zero crosses are ignored while INTERVAL_TIMER is below this,
+// covering the demag window after commutation and any soft commutation
+// ramp. 0 (features off) preserves the original behavior.
+volatile uint32_t zc_gate_cnt = 0;
+
+#ifdef HAVE_PHASE_BLEND
+// soft commutation: the outgoing phase is kept in complementary PWM for a
+// short ramp instead of floating instantly. State is written by commutate()
+// (COM timer interrupt) and consumed by the loop under disabled interrupts.
+volatile uint8_t blend_active = 0;
+volatile uint8_t blend_phase = 0; // 0=A 1=B 2=C, the newly floating phase
+volatile uint8_t blend_from_pwm = 0; // 1: ramp duty->0 (was PWM), 0: ramp 0->duty (was LOW)
+volatile uint32_t blend_start_cnt = 0;
+volatile uint32_t blend_len = 0;
+volatile uint8_t soft_comm_armed = 0; // loop passes since role aware compare writes engaged
+// phase left floating / driven low by comStep, indexed by step 1-6
+static const uint8_t step_float_phase[7] = { 0, 2, 0, 1, 2, 0, 1 };
+static const uint8_t step_low_phase[7] = { 0, 1, 1, 0, 0, 2, 2 };
+#endif
+
 #if defined(NEED_INPUT_READY) || defined(NXP)
 volatile char input_ready = 0;
 #endif
@@ -622,6 +642,20 @@ void loadEEpromSettings()
     if(eepromBuffer.brake_on_zero_throttle > 9){ // byte 13 held a firmware name character (0x30 or similar) before eeprom version 4
       eepromBuffer.brake_on_zero_throttle = 0;
     }
+    // quiet drive experiments, all default off. Out of range (erased flash
+    // reads 0xff) disables them.
+    if (eepromBuffer.quiet.demag_blank > 4) {
+        eepromBuffer.quiet.demag_blank = 0;
+    }
+    if (eepromBuffer.quiet.comm_filter > 4) {
+        eepromBuffer.quiet.comm_filter = 0;
+    }
+    if (eepromBuffer.quiet.soft_comm > 4) {
+        eepromBuffer.quiet.soft_comm = 0;
+    }
+#ifndef HAVE_PHASE_BLEND
+    eepromBuffer.quiet.soft_comm = 0; // no per phase drive helpers on this target
+#endif
     // eepromBuffer.advance_level can either be set to 0-3 with config tools less than 1.90 or 10-42 with 1.90 or above 
     if (eepromBuffer.advance_level > 42 || (eepromBuffer.advance_level < 10 && eepromBuffer.advance_level > 3)){
         temp_advance = 16;
@@ -893,6 +927,41 @@ void commutate()
         comStep(step);
     }
     __enable_irq();
+#ifdef HAVE_PHASE_BLEND
+    // an unfinished ramp needs no cleanup: comStep just reassigned all
+    // three phases, only the bookkeeping is cleared
+    blend_active = 0;
+    // duty capped at 50%: the ramp lowers the outgoing winding voltage
+    // by up to a quarter of the duty, and above ~50% duty that drives
+    // the winding current through zero into reverse before the ramp
+    // ends, clamping the sense phase through a body diode and hiding
+    // the next zero cross. Low/mid throttle is where commutation noise
+    // dominates acoustically anyway
+    if (eepromBuffer.quiet.soft_comm && temp_comp_pwm && running
+        && !old_routine && !prop_brake_active && !stepper_sine
+        && (zero_crosses > 100) && (soft_comm_armed > 20)
+        && (duty_cycle > 150) && (duty_cycle < 1000)) {
+        uint32_t bl = (commutation_interval * eepromBuffer.quiet.soft_comm) >> 4; // 3.75 deg per unit
+        // below ~1 loop period the ramp degenerates to a delayed float,
+        // above interrupt mode range the polling loop owns commutation
+        if ((bl >= 100) && (commutation_interval < 4000)) {
+            uint8_t ph = step_float_phase[(uint8_t)step];
+            // forward: even steps release the PWM phase, odd steps the LOW
+            // phase; reversed rotation swaps the parity
+            uint8_t from_pwm = forward ? ((step & 1) == 0) : ((step & 1) == 1);
+            // re-engage the outgoing phase in complementary PWM. Its
+            // compare register already matches this start value because the
+            // role aware duty writer kept it there all through the last step
+            phaseSetCompare(ph, from_pwm ? ((duty_cycle * tim1_arr) / 2000) : 0);
+            phaseRestorePWM(ph);
+            blend_phase = ph;
+            blend_from_pwm = from_pwm;
+            blend_start_cnt = INTERVAL_TIMER_COUNT;
+            blend_len = bl;
+            blend_active = 1;
+        }
+    }
+#endif
     changeCompInput();
 #ifndef NO_POLLING_START
 	if (average_interval > polling_mode_changeover + 500) {
@@ -920,13 +989,56 @@ void PeriodElapsedCallback()
 {
     DISABLE_COM_TIMER_INT(); // disable interrupt
     commutate();
-    commutation_interval = ((commutation_interval)+((lastzctime + thiszctime) >> 1))>>1;
+    uint32_t avg2 = (lastzctime + thiszctime) >> 1;
+    if (eepromBuffer.quiet.comm_filter && (zero_crosses > 40)) {
+        // low gain tracking filter: a noisy zero cross moves the estimate
+        // by at most 1/4 (per step outlier clamp) scaled by the gain,
+        // instead of feeding half of the jitter straight into timing
+        int32_t err = (int32_t)avg2 - (int32_t)commutation_interval;
+        int32_t lim = (int32_t)(commutation_interval >> 2);
+        if (err > lim) {
+            err = lim;
+        }
+        if (err < -lim) {
+            err = -lim;
+        }
+        uint8_t shift = eepromBuffer.quiet.comm_filter + 1; // 1-4 -> new sample weight 1/4 to 1/32
+        if (err >= 0) {
+            commutation_interval += (uint32_t)((err + (1 << (shift - 1))) >> shift);
+        } else {
+            commutation_interval -= (uint32_t)(((-err) + (1 << (shift - 1))) >> shift);
+        }
+    } else {
+        commutation_interval = (commutation_interval + avg2) >> 1;
+    }
   	if (!eepromBuffer.auto_advance) {
 	  advance = (commutation_interval * temp_advance) >> 6; // 60 divde 64 0.9375 degree increments
 	} else {
 	  advance = (commutation_interval * auto_advance_level) >> 6; // 60 divde 64 0.9375 degree increments
     }
     waitTime = (commutation_interval >> 1) - advance;
+    // post-commutation blanking: reject comparator events while the just
+    // floated winding still demagnetizes through the bridge, and during a
+    // soft commutation ramp while that winding is still driven
+    uint32_t gate = 0;
+    if (eepromBuffer.quiet.demag_blank && (zero_crosses > 20)) {
+        gate = (commutation_interval * (8u + eepromBuffer.quiet.demag_blank)) >> 4; // 56-75% of interval
+    }
+#ifdef HAVE_PHASE_BLEND
+    if (blend_active) {
+        uint32_t blend_gate = blend_start_cnt + blend_len + (blend_len >> 1);
+        if (blend_gate > gate) {
+            gate = blend_gate;
+        }
+    }
+#endif
+    {
+        uint32_t gate_cap = (commutation_interval * 7) >> 3; // keep the last 12.5% before the expected cross open
+        if (gate > gate_cap) {
+            gate = gate_cap;
+        }
+    }
+    zc_gate_cnt = gate;
     if (!old_routine) {
         enableCompInterrupts(); // enable comp interrupt
     }
@@ -954,6 +1066,14 @@ void interruptRoutine()
 //            return;
 //        }
 //    }
+    if (zc_gate_cnt && (INTERVAL_TIMER_COUNT < zc_gate_cnt)) {
+        return; // still inside the post-commutation blanking window
+    }
+#ifdef HAVE_PHASE_BLEND
+    if (blend_active) {
+        return; // sense phase is still driven by the soft commutation ramp
+    }
+#endif
         for (int i = 0; i < filter_level; i++) {
 #if defined(MCU_F031) || defined(MCU_G031)
             if (((current_GPIO_PORT->IDR & current_GPIO_PIN) == !(rising))) {
@@ -1350,6 +1470,63 @@ if (!stepper_sine && armed) {
 #endif
 }
 
+#ifdef HAVE_PHASE_BLEND
+/*
+ * Duty cycle application with role aware per phase compare values and the
+ * soft commutation ramp. With soft_comm disabled this reduces to
+ * SET_DUTY_CYCLE_ALL. The role aware writes keep the LOW phase compare at
+ * zero so a phase released from LOW can re-enter complementary PWM for its
+ * ramp without a one PWM period glitch (compare registers are preloaded),
+ * and keep the floating phase compare at the running duty so comStep can
+ * promote it to the PWM role instantly.
+ */
+static void applyDutyCycles(uint16_t adjusted)
+{
+    if (!eepromBuffer.quiet.soft_comm || stepper_sine || !running
+        || old_routine || prop_brake_active || !temp_comp_pwm) {
+        soft_comm_armed = 0;
+        SET_DUTY_CYCLE_ALL(adjusted);
+        return;
+    }
+    if (soft_comm_armed < 255) {
+        soft_comm_armed++; // commutate() waits for the writes to settle
+    }
+    __disable_irq(); // consistent snapshot of step and blend state
+    uint16_t ccr[3];
+    ccr[0] = adjusted;
+    ccr[1] = adjusted;
+    ccr[2] = adjusted;
+    ccr[step_low_phase[(uint8_t)step]] = 0;
+    if (blend_active) {
+        uint32_t elapsed = INTERVAL_TIMER_COUNT - blend_start_cnt;
+        if (elapsed >= blend_len) { // also true if a zero cross reset the timer
+            phaseFloatOne(blend_phase);
+            blend_active = 0;
+            // the ramp can finish up to one loop period after its planned
+            // end; give the freshly floated winding a settle window before
+            // accepting comparator events again
+            uint32_t settle = INTERVAL_TIMER_COUNT + (blend_len >> 2);
+            if (settle > zc_gate_cnt) {
+                zc_gate_cnt = settle;
+            }
+        } else {
+            // ramp half way toward the opposite rail (approximately the
+            // virtual neutral), then float. Ramping the full way drives
+            // the outgoing winding current through zero into reverse at
+            // high duty; the reverse recovery then clamps the sense
+            // phase to a rail through the body diode long enough to
+            // hide the next zero cross entirely (desync)
+            uint32_t ramp = ((uint32_t)adjusted * elapsed) / (2 * blend_len);
+            ccr[blend_phase] = blend_from_pwm ? (adjusted - ramp) : ramp;
+        }
+    }
+    phaseSetCompare(0, ccr[0]);
+    phaseSetCompare(1, ccr[1]);
+    phaseSetCompare(2, ccr[2]);
+    __enable_irq();
+}
+#endif
+
 void tenKhzRoutine()
 { // 20khz as of 2.00 to be renamed
     duty_cycle = duty_cycle_setpoint;
@@ -1553,7 +1730,11 @@ void tenKhzRoutine()
         }
         last_duty_cycle = duty_cycle;
         SET_AUTO_RELOAD_PWM(tim1_arr);
+#ifdef HAVE_PHASE_BLEND
+        applyDutyCycles(adjusted_duty_cycle);
+#else
         SET_DUTY_CYCLE_ALL(adjusted_duty_cycle);
+#endif
     }
 #endif // ndef brushed_mode
 #if defined(FIXED_DUTY_MODE) || defined(FIXED_SPEED_MODE)

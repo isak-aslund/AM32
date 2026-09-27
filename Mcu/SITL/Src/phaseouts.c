@@ -10,6 +10,8 @@
 #include "sitl.h"
 #include "targets.h"
 
+#include <stdio.h>
+
 volatile uint8_t sitl_phase_mode[3];
 
 static void phasePWM(int p)
@@ -83,6 +85,32 @@ void comStep(int newStep)
         phaseLOW(2);
         break;
     }
+}
+
+/*
+ * Soft commutation blend support (HAVE_PHASE_BLEND). Phase indices and
+ * TIM1 compare channels are both 0=A 1=B 2=C in the simulation.
+ */
+void phaseRestorePWM(uint8_t phase)
+{
+    // only the soft commutation blend re-engages a single phase; a
+    // rate limited diagnostic makes blend engagement visible in logs
+    static uint32_t blend_count;
+    if ((blend_count++ % 5000) == 0) {
+        fprintf(stderr, "SITL: soft blend engaged (count %u, phase %u)\n",
+            (unsigned)blend_count, (unsigned)phase);
+    }
+    phasePWM(phase);
+}
+
+void phaseFloatOne(uint8_t phase)
+{
+    phaseFLOAT(phase);
+}
+
+void phaseSetCompare(uint8_t phase, uint16_t value)
+{
+    sitl_tim1_set_duty(phase, value);
 }
 
 void fullBrake(void)

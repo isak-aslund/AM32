@@ -245,7 +245,7 @@ void sys_can_init(void)
     socklen_t alen = sizeof(tx_addr);
     getsockname(fd_out, (struct sockaddr*)&tx_addr, &alen);
 
-    fprintf(stderr, "SITL: CAN on %s (%s:%d)\n", name, address, MCAST_PORT);
+    fprintf(stderr, "SITL: CAN on %s (%s:%d)\n", name, address, mcast_port);
 }
 
 int16_t sys_can_transmit(const CanardCANFrame* txf)

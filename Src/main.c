@@ -1719,9 +1719,18 @@ static void rpm_governor_update(void)
     if (cmd < 0) {
         cmd = 0;
     }
-    if (cmd > 2047) {
-        cmd = 2047;
-        // back off the integrator while saturated so it cannot wind up
+    // output ceiling: full scale, or the current limiter's cap when it is
+    // active. Anti-windup against BOTH - on a heavy prop a setpoint step is
+    // current-limited, and without this the integrator winds up during the
+    // (physics-limited) climb and overshoots badly on arrival.
+    int32_t out_limit = 2047;
+    if (use_current_limit && (int32_t)use_current_limit_adjust < out_limit) {
+        out_limit = use_current_limit_adjust;
+    }
+    if (cmd > out_limit) {
+        cmd = out_limit;
+        // undo this step's integral accumulation so it cannot wind past
+        // what the output can actually deliver
         if (err_n > 0 && rpm_integral > 0) {
             rpm_integral -= (int32_t)eepromBuffer.rpm.ki * err_n;
         }

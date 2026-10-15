@@ -78,8 +78,21 @@ typedef union EEprom_u {
             uint8_t soft_start_erpm; // 188  soft start handover speed in hundreds of erpm, 5-100
         } quiet;
         uint8_t reserved_2[3]; // 189-191
+        struct {
+            uint8_t mode; // 192  0=off, 1=closed-loop eRPM governor
+            uint8_t max_erpm_lo; // 193  eRPM at 100% throttle, uint16 LE in units of 100 eRPM
+            uint8_t max_erpm_hi; // 194
+            uint8_t kp; // 195  proportional gain (normalised, 0-255)
+            uint8_t ki; // 196  integral gain
+            uint8_t kd; // 197  derivative gain (acts on the slow speed estimate)
+            uint8_t spd_filter; // 198  speed-estimate filter time constant (ms) for the P/I path, 1-100
+            uint8_t d_filter; // 199  extra low-pass time constant (ms) for the derivative, 1-100
+            uint8_t ff_kv; // 200  linear back-emf feedforward trim, percent of the Kv-derived value (100=1.0x)
+            uint8_t ff_load; // 201  quadratic propeller-load feedforward gain (0=off)
+        } rpm;
+        uint8_t reserved_3[54]; // 202-255
     };
-    uint8_t buffer[192];
+    uint8_t buffer[256];
 } EEprom_t;
 
 extern EEprom_t eepromBuffer;

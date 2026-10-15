@@ -544,6 +544,17 @@ uint8_t soft_start_stopped_seen = 0; // a back-emf timeout (true standstill) was
 #ifdef MCU_SITL
 void sitl_soft_start_rearmed(void);
 #endif
+
+// closed-loop eRPM governor (eepromBuffer.rpm.mode)
+#define RPM_DEFAULT_KP 40
+#define RPM_DEFAULT_KI 8
+#define RPM_DEFAULT_KD 30
+uint16_t rpm_max_erpm_cfg = 500; // DroneCAN-facing max eRPM in units of 100 eRPM
+uint32_t rpm_target_erpm = 0; // commanded eRPM from throttle
+int32_t rpm_erpm_filt = 0; // speed estimate for the P/I path (eRPM)
+int32_t rpm_erpm_filt_d = 0; // slower speed estimate for the derivative (eRPM)
+int32_t rpm_d_last_n = 0; // last normalised D-path estimate
+int32_t rpm_integral = 0; // governor integrator (normalised command * 256)
 uint16_t gate_drive_offset = DEAD_TIME;
 
 uint8_t stuckcounter = 0;
@@ -678,6 +689,40 @@ void loadEEpromSettings()
 #endif
     if (eepromBuffer.quiet.soft_start_erpm < 5 || eepromBuffer.quiet.soft_start_erpm > 100) {
         eepromBuffer.quiet.soft_start_erpm = 21; // 2100 erpm, the stock sine changeover speed
+    }
+    // closed-loop eRPM governor. mode is 0 or 1; any other value (0xFF on
+    // flash erased or upgraded from the old 192-byte layout) means the rpm
+    // block was never written, so initialise the whole block to defaults.
+    if (eepromBuffer.rpm.mode > 1) {
+        eepromBuffer.rpm.mode = 0;
+        eepromBuffer.rpm.max_erpm_lo = (uint8_t)(500 & 0xFF);
+        eepromBuffer.rpm.max_erpm_hi = (uint8_t)(500 >> 8);
+        eepromBuffer.rpm.kp = RPM_DEFAULT_KP;
+        eepromBuffer.rpm.ki = RPM_DEFAULT_KI;
+        eepromBuffer.rpm.kd = RPM_DEFAULT_KD;
+        eepromBuffer.rpm.spd_filter = 20;
+        eepromBuffer.rpm.d_filter = 50;
+        eepromBuffer.rpm.ff_kv = 100;
+        eepromBuffer.rpm.ff_load = 0;
+    }
+    if (eepromBuffer.rpm.spd_filter < 1 || eepromBuffer.rpm.spd_filter > 100) {
+        eepromBuffer.rpm.spd_filter = 20;
+    }
+    if (eepromBuffer.rpm.d_filter < 1 || eepromBuffer.rpm.d_filter > 100) {
+        eepromBuffer.rpm.d_filter = 50;
+    }
+    if (eepromBuffer.rpm.ff_kv > 200) {
+        eepromBuffer.rpm.ff_kv = 100;
+    }
+    rpm_max_erpm_cfg = (uint16_t)eepromBuffer.rpm.max_erpm_lo
+        | ((uint16_t)eepromBuffer.rpm.max_erpm_hi << 8);
+    if (rpm_max_erpm_cfg < 10 || rpm_max_erpm_cfg > 2000) {
+        rpm_max_erpm_cfg = 500; // 50,000 eRPM
+        eepromBuffer.rpm.max_erpm_lo = (uint8_t)(500 & 0xFF);
+        eepromBuffer.rpm.max_erpm_hi = (uint8_t)(500 >> 8);
+    }
+    if (eepromBuffer.rpm.mode) {
+        use_speed_control_loop = 1;
     }
     // eepromBuffer.advance_level can either be set to 0-3 with config tools less than 1.90 or 10-42 with 1.90 or above 
     if (eepromBuffer.advance_level > 42 || (eepromBuffer.advance_level < 10 && eepromBuffer.advance_level > 3)){
@@ -1310,7 +1355,37 @@ void setInput()
             }
         } else {
             if (use_speed_control_loop) {
-                if (drive_by_rpm) {
+                if (eepromBuffer.rpm.mode) {
+                    // closed-loop eRPM governor: throttle sets the eRPM
+                    // target; the governor drives input_override at 1kHz
+                    if (adjusted_input < 47) {
+                        rpm_target_erpm = 0;
+                        input = 0;
+                        input_override = 0;
+                        rpm_integral = 0;
+                    } else {
+                        uint32_t maxe = (uint32_t)rpm_max_erpm_cfg * 100;
+                        uint32_t idle = maxe / 40; // ~2.5% of full at min throttle
+                        rpm_target_erpm = idle
+                            + (uint32_t)(adjusted_input - 47) * (maxe - idle) / (2047 - 47);
+                        if (!running || zero_crosses < 100) {
+                            // pass throttle through for a normal spin-up; the
+                            // governor cannot build input_override until the
+                            // motor is running and synced. Seed input_override
+                            // from the throttle so handover has no bump.
+                            input = adjusted_input;
+                            input_override = (int32_t)adjusted_input * 10000;
+                        } else {
+                            input = (uint16_t)(input_override / 10000);
+                            if (input > 2047) {
+                                input = 2047;
+                            }
+                            if (input < 48) {
+                                input = 48;
+                            }
+                        }
+                    }
+                } else if (drive_by_rpm) {
                     target_e_com_time = 60000000 / map(adjusted_input, 47, 2047, MINIMUM_RPM_SPEED_CONTROL, MAXIMUM_RPM_SPEED_CONTROL) / (eepromBuffer.motor_poles / 2);
                     if (adjusted_input < 47) { // dead band ?
                         input = 0;
@@ -1568,6 +1643,92 @@ static void applyDutyCycles(uint16_t adjusted)
 }
 #endif
 
+/*
+ * Closed-loop eRPM governor (eepromBuffer.rpm.mode). Runs in the 1kHz PID
+ * block while the motor is running and drives input_override (the existing
+ * speed-control command path, command units * 10000).
+ *
+ * Works in the eRPM domain: target comes from throttle, measurement from
+ * e_com_time (us per electrical revolution, already the sum of 6 commutation
+ * intervals so per-sensor asymmetry is averaged out). Two independent IIR
+ * filters smooth the estimate - a light one (spd_filter) for P and I, and a
+ * heavier one (d_filter) for the derivative, which is the noise-sensitive
+ * term. Feedforward supplies most of the command so the PID only trims:
+ *   - linear back-emf: the duty needed to spin at target with no load,
+ *     derived from Kv, bus voltage and pole pairs, trimmed by ff_kv percent
+ *   - quadratic prop load: extra duty rising with (target/max)^2, gain ff_load
+ */
+static void rpm_governor_update(void)
+{
+    int32_t maxe = (int32_t)rpm_max_erpm_cfg * 100; // full-scale eRPM
+    if (maxe < 1000) {
+        maxe = 1000;
+    }
+    // measured eRPM from the 6-commutation electrical-revolution time
+    int32_t meas = (e_com_time > 0) ? (int32_t)(60000000 / e_com_time) : 0;
+
+    // speed-estimate filters: x += (meas - x) / tc, time constant ~tc ms at
+    // the 1kHz loop rate. Light for P/I, heavy for the derivative.
+    rpm_erpm_filt += (meas - rpm_erpm_filt) / (int32_t)eepromBuffer.rpm.spd_filter;
+    rpm_erpm_filt_d += (meas - rpm_erpm_filt_d) / (int32_t)eepromBuffer.rpm.d_filter;
+
+    // normalise error to +/-2048 at a full-scale error so gains are portable
+    // across motors regardless of absolute eRPM
+    int32_t err = (int32_t)rpm_target_erpm - rpm_erpm_filt;
+    int32_t err_n = (err * 2048) / maxe;
+
+    int32_t p = (int32_t)eepromBuffer.rpm.kp * err_n;
+
+    rpm_integral += (int32_t)eepromBuffer.rpm.ki * err_n;
+    const int32_t int_limit = 2048 * 256; // integral alone can reach full command
+    if (rpm_integral > int_limit) {
+        rpm_integral = int_limit;
+    }
+    if (rpm_integral < -int_limit) {
+        rpm_integral = -int_limit;
+    }
+
+    // derivative on the slow estimate, opposing the rate of change of speed
+    int32_t d_meas_n = (rpm_erpm_filt_d * 2048) / maxe;
+    int32_t deriv = -(int32_t)eepromBuffer.rpm.kd * (d_meas_n - rpm_d_last_n);
+    rpm_d_last_n = d_meas_n;
+
+    int32_t trim = (p + rpm_integral + deriv) >> 8; // back to command units
+
+    // feedforward in command units (0-2000)
+    int32_t ff = 0;
+    int32_t erpm_full = (int32_t)motor_kv * ((int32_t)battery_voltage / 10)
+        * ((int32_t)eepromBuffer.motor_poles / 2); // eRPM at full duty, no load
+    if (erpm_full > 1000) {
+        int32_t ff_lin = (int32_t)(2000 * (int64_t)rpm_target_erpm / erpm_full);
+        ff_lin = ff_lin * (int32_t)eepromBuffer.rpm.ff_kv / 100;
+        ff += ff_lin;
+    }
+    if (eepromBuffer.rpm.ff_load) {
+        int32_t frac = (int32_t)((int64_t)rpm_target_erpm * 256 / maxe); // 0-256
+        ff += (int32_t)eepromBuffer.rpm.ff_load * frac * frac / 16384;
+    }
+    if (ff < 0) {
+        ff = 0;
+    }
+    if (ff > 2000) {
+        ff = 2000;
+    }
+
+    int32_t cmd = ff + trim;
+    if (cmd < 0) {
+        cmd = 0;
+    }
+    if (cmd > 2047) {
+        cmd = 2047;
+        // back off the integrator while saturated so it cannot wind up
+        if (err_n > 0 && rpm_integral > 0) {
+            rpm_integral -= (int32_t)eepromBuffer.rpm.ki * err_n;
+        }
+    }
+    input_override = cmd * 10000;
+}
+
 void tenKhzRoutine()
 { // 20khz as of 2.00 to be renamed
     duty_cycle = duty_cycle_setpoint;
@@ -1713,15 +1874,22 @@ void tenKhzRoutine()
                 }
             }
             if (use_speed_control_loop && running) {
-                input_override += doPidCalculations(&speedPid, e_com_time, target_e_com_time);
-                if (input_override > 2047 * 10000) {
-                    input_override = 2047 * 10000;
-                }
-                if (input_override < 0) {
-                    input_override = 0;
-                }
-                if (zero_crosses < 100) {
-                    speedPid.integral = 0;
+                if (eepromBuffer.rpm.mode) {
+                    if (zero_crosses < 100) {
+                        rpm_integral = 0; // hold integrator until synced
+                    }
+                    rpm_governor_update();
+                } else {
+                    input_override += doPidCalculations(&speedPid, e_com_time, target_e_com_time);
+                    if (input_override > 2047 * 10000) {
+                        input_override = 2047 * 10000;
+                    }
+                    if (input_override < 0) {
+                        input_override = 0;
+                    }
+                    if (zero_crosses < 100) {
+                        speedPid.integral = 0;
+                    }
                 }
             }
         }

@@ -110,6 +110,7 @@ static void can_printf(const char *fmt, ...);
   access to settings from main.c
  */
 extern uint16_t motor_kv;
+extern uint16_t rpm_max_erpm_cfg;
 extern volatile char armed;
 extern volatile uint32_t commutation_interval;
 extern uint8_t auto_advance_level;
@@ -191,6 +192,21 @@ static const struct parameter {
         // Uses SINE_MODE_POWER for the drive strength, needs COMP_PWM
         { "SOFT_START",             T_UINT8, 0, 50,  0, &eepromBuffer.quiet.soft_start},
         { "SOFT_START_ERPM",        T_UINT8, 5, 100, 21, &eepromBuffer.quiet.soft_start_erpm},
+
+        // closed-loop eRPM governor. RPM_MAX_ERPM is in units of 100 eRPM
+        // (500 = 50,000 eRPM); throttle maps linearly to a target between
+        // ~2.5% and 100% of it. Gains are normalised so they port across
+        // motors. FF_KV trims the Kv-derived back-emf feedforward (percent);
+        // FF_LOAD adds a quadratic propeller-load feedforward (0 = off).
+        { "RPM_MODE",               T_BOOL,  0, 1,   0, &eepromBuffer.rpm.mode},
+        { "RPM_MAX_ERPM",           T_UINT16,10,2000, 500, &rpm_max_erpm_cfg},
+        { "RPM_KP",                 T_UINT8, 0, 255, 40, &eepromBuffer.rpm.kp},
+        { "RPM_KI",                 T_UINT8, 0, 255, 8,  &eepromBuffer.rpm.ki},
+        { "RPM_KD",                 T_UINT8, 0, 255, 30, &eepromBuffer.rpm.kd},
+        { "RPM_SPD_FILTER",         T_UINT8, 1, 100, 20, &eepromBuffer.rpm.spd_filter},
+        { "RPM_D_FILTER",           T_UINT8, 1, 100, 50, &eepromBuffer.rpm.d_filter},
+        { "RPM_FF_KV",              T_UINT8, 0, 200, 100, &eepromBuffer.rpm.ff_kv},
+        { "RPM_FF_LOAD",            T_UINT8, 0, 255, 0,  &eepromBuffer.rpm.ff_load},
         { "STARTUP_POWER",          T_UINT8, 50,150, 100, &eepromBuffer.startup_power},
         { "STALL_PROTECTION",       T_UINT8, 0, 3,   0, &eepromBuffer.stall_protection},
         { "STUCK_ROTOR_PROTECTION", T_BOOL,  0, 1,   1, &eepromBuffer.stuck_rotor_protection},
@@ -451,6 +467,9 @@ static void handle_param_GetSet(CanardInstance* ins, CanardRxTransfer* transfer)
                     eepromBuffer.motor_kv = (uint8_t)((*(uint16_t *)p->ptr - 20) / 40);
                 } else if (ptr16 == &low_cell_volt_cutoff) {
                     eepromBuffer.low_cell_volt_cutoff = (uint8_t)(*ptr16 - 250);
+                } else if (ptr16 == &rpm_max_erpm_cfg) {
+                    eepromBuffer.rpm.max_erpm_lo = (uint8_t)(*ptr16 & 0xFF);
+                    eepromBuffer.rpm.max_erpm_hi = (uint8_t)(*ptr16 >> 8);
                 }
                 break;
             }
